@@ -2,5 +2,9 @@
 *.swp
 *.swo
 *~
-.cbus/snapshots/
 .env
+
+# cbus runtime (generated per-project by `cbus init`)
+.cbus/
+/state.yaml
+!/templates/state.yaml

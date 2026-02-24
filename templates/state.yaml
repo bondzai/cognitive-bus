@@ -1,0 +1,19 @@
+# Cognitive Bus State
+project: my-project
+phase: discovery
+current_goal: "Define the project goal"
+active_mode: THINK
+energy: medium
+
+# Decisions
+decisions:
+  - id: d-001
+    question: "What is the first decision to make?"
+    status: open
+    mode: THINK
+    verdict: null
+    reasoning: null
+    date: null
+
+# Blockers
+blockers: []

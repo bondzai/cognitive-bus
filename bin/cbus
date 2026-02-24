@@ -1,0 +1,473 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CBUS_DIR="${CBUS_DIR:-.cbus}"
+STATE_FILE="state.yaml"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TEMPLATES_DIR="$SCRIPT_DIR/../templates"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+usage() {
+  cat <<EOF
+${BOLD}cbus${NC} — Cognitive Bus CLI
+
+${BOLD}USAGE${NC}
+  cbus <command> [args]
+
+${BOLD}COMMANDS${NC}
+  ${GREEN}init${NC}                  Scaffold .cbus/ directory and state.yaml
+  ${GREEN}status${NC}                Show current state summary
+  ${GREEN}snapshot${NC}              Generate context snapshot (stdout)
+
+  ${CYAN}think${NC} <prompt>         Start THINK mode (critic)
+  ${CYAN}build${NC} <prompt>         Start BUILD mode (builder)
+  ${CYAN}learn${NC} <prompt>         Start LEARN mode (tutor)
+  ${CYAN}operate${NC} <prompt>       Start OPERATE mode (operator)
+
+  ${YELLOW}decide${NC} <id> <verdict>  Close a decision
+  ${YELLOW}block${NC} <description>   Add a blocker
+  ${YELLOW}unblock${NC} <index>       Remove a blocker
+
+  ${BLUE}reflect${NC}               Run end-of-session reflection
+  ${BLUE}scorecard${NC}             Show weekly scorecard
+
+  ${DIM}help${NC}                  Show this help message
+
+${BOLD}EXAMPLES${NC}
+  cbus init
+  cbus think "Should I use Redis or in-memory cache?"
+  cbus build "Implement the caching layer"
+  cbus reflect
+EOF
+}
+
+# ── Helpers ──────────────────────────────────────────────
+
+require_state() {
+  if [[ ! -f "$STATE_FILE" ]]; then
+    echo -e "${RED}Error:${NC} No state.yaml found. Run ${GREEN}cbus init${NC} first."
+    exit 1
+  fi
+}
+
+require_cbus() {
+  if [[ ! -d "$CBUS_DIR" ]]; then
+    echo -e "${RED}Error:${NC} No .cbus/ directory. Run ${GREEN}cbus init${NC} first."
+    exit 1
+  fi
+}
+
+read_yaml_field() {
+  local field="$1"
+  grep "^${field}:" "$STATE_FILE" 2>/dev/null | sed "s/^${field}: *//" | sed 's/^"//' | sed 's/"$//' | sed 's/ *#.*//'
+}
+
+timestamp() {
+  date +%Y-%m-%d
+}
+
+now() {
+  date "+%Y-%m-%d %H:%M"
+}
+
+# ── Commands ─────────────────────────────────────────────
+
+cmd_init() {
+  if [[ -f "$STATE_FILE" ]]; then
+    echo -e "${YELLOW}state.yaml already exists.${NC} Skipping."
+  else
+    cp "$TEMPLATES_DIR/state.yaml" ./state.yaml
+    echo -e "${GREEN}Created${NC} state.yaml"
+  fi
+
+  mkdir -p "$CBUS_DIR/prompts" "$CBUS_DIR/reflections" "$CBUS_DIR/snapshots" "$CBUS_DIR/logs"
+
+  for mode in think build learn operate; do
+    if [[ ! -f "$CBUS_DIR/prompts/${mode}.md" ]]; then
+      cp "$TEMPLATES_DIR/prompts/${mode}.md" "$CBUS_DIR/prompts/${mode}.md"
+      echo -e "${GREEN}Created${NC} $CBUS_DIR/prompts/${mode}.md"
+    fi
+  done
+
+  echo ""
+  echo -e "${GREEN}Cognitive Bus initialized.${NC}"
+  echo -e "Edit ${BOLD}state.yaml${NC} to set your project and goal."
+  echo -e "Run ${BOLD}cbus status${NC} to verify."
+}
+
+cmd_status() {
+  require_state
+
+  local project phase goal energy mode
+  project=$(read_yaml_field "project")
+  phase=$(read_yaml_field "phase")
+  goal=$(read_yaml_field "current_goal")
+  energy=$(read_yaml_field "energy")
+  mode=$(read_yaml_field "active_mode")
+
+  local decisions_open=0 blockers_count=0
+  decisions_open=$(grep -c "status: open" "$STATE_FILE" 2>/dev/null || true)
+  decisions_open=${decisions_open:-0}
+  local blocker_line
+  blocker_line=$(grep "^blockers:" "$STATE_FILE" 2>/dev/null || true)
+  if echo "$blocker_line" | grep -q "\[\]"; then
+    blockers_count=0
+  else
+    blockers_count=$(sed -n '/^blockers:/,/^[a-z]/p' "$STATE_FILE" 2>/dev/null | grep -c "^  - " 2>/dev/null || true)
+    blockers_count=${blockers_count:-0}
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}═══ Cognitive Bus Status ═══${NC}"
+  echo ""
+  echo -e "  ${DIM}Project${NC}      ${BOLD}${project:-not set}${NC}"
+  echo -e "  ${DIM}Phase${NC}        ${phase:-not set}"
+  echo -e "  ${DIM}Mode${NC}         ${CYAN}${mode:-THINK}${NC}"
+  echo -e "  ${DIM}Goal${NC}         ${goal:-not set}"
+  echo -e "  ${DIM}Energy${NC}       ${energy:-not set}"
+  echo -e "  ${DIM}Decisions${NC}    ${decisions_open} open"
+  echo -e "  ${DIM}Blockers${NC}     ${blockers_count}"
+  echo ""
+
+  # Show latest reflection if exists
+  local latest_ref
+  latest_ref=$(ls -1 "$CBUS_DIR/reflections/" 2>/dev/null | sort -r | head -1)
+  if [[ -n "$latest_ref" ]]; then
+    local ref_score ref_insight
+    ref_score=$(grep "^score:" "$CBUS_DIR/reflections/$latest_ref" 2>/dev/null | sed 's/score: *//')
+    ref_insight=$(grep "^insight:" "$CBUS_DIR/reflections/$latest_ref" 2>/dev/null | sed 's/insight: *//' | sed 's/^"//' | sed 's/"$//')
+    echo -e "  ${DIM}Last reflection${NC}  ${latest_ref%.yaml} — ${ref_score:-?}/10"
+    echo -e "  ${DIM}Insight${NC}         ${ref_insight:-none}"
+    echo ""
+  fi
+}
+
+cmd_snapshot() {
+  require_state
+
+  local project phase goal energy mode
+  project=$(read_yaml_field "project")
+  phase=$(read_yaml_field "phase")
+  goal=$(read_yaml_field "current_goal")
+  energy=$(read_yaml_field "energy")
+  mode=$(read_yaml_field "active_mode")
+
+  local decisions_open=0 blockers_count=0
+  if grep -q "status: open" "$STATE_FILE" 2>/dev/null; then
+    decisions_open=$(grep -c "status: open" "$STATE_FILE")
+  fi
+
+  # Get latest reflection
+  local ref_line=""
+  local latest_ref
+  latest_ref=$(ls -1 "$CBUS_DIR/reflections/" 2>/dev/null | sort -r | head -1)
+  if [[ -n "$latest_ref" ]]; then
+    local ref_score ref_insight
+    ref_score=$(grep "^score:" "$CBUS_DIR/reflections/$latest_ref" 2>/dev/null | sed 's/score: *//')
+    ref_insight=$(grep "^insight:" "$CBUS_DIR/reflections/$latest_ref" 2>/dev/null | sed 's/insight: *//' | sed 's/^"//' | sed 's/"$//')
+    ref_line="- Last reflection: ${latest_ref%.yaml} — score ${ref_score:-?}/10
+- Key insight: ${ref_insight:-none}"
+  fi
+
+  cat <<EOF
+## Context Snapshot ($(timestamp))
+- Project: ${project:-not set}
+- Phase: ${phase:-not set}
+- Mode: ${mode:-THINK}
+- Goal: ${goal:-not set}
+- Open decisions: ${decisions_open}
+- Energy: ${energy:-not set}
+${ref_line}
+EOF
+}
+
+cmd_mode_session() {
+  local mode="$1"
+  shift
+  local prompt="$*"
+  local mode_upper mode_lower
+
+  mode_upper=$(echo "$mode" | tr '[:lower:]' '[:upper:]')
+  mode_lower=$(echo "$mode" | tr '[:upper:]' '[:lower:]')
+
+  require_state
+  require_cbus
+
+  if [[ -z "$prompt" ]]; then
+    echo -e "${RED}Error:${NC} Provide a prompt. Example: ${GREEN}cbus ${mode_lower} \"your question\"${NC}"
+    exit 1
+  fi
+
+  # Update active_mode in state
+  if grep -q "^active_mode:" "$STATE_FILE"; then
+    sed -i '' "s/^active_mode:.*/active_mode: ${mode_upper}/" "$STATE_FILE"
+  fi
+
+  # Load mode prompt
+  local system_prompt=""
+  if [[ -f "$CBUS_DIR/prompts/${mode_lower}.md" ]]; then
+    system_prompt=$(cat "$CBUS_DIR/prompts/${mode_lower}.md")
+  fi
+
+  # Generate snapshot
+  local snapshot
+  snapshot=$(cmd_snapshot)
+
+  # Build full system prompt
+  local full_prompt="${snapshot}
+
+---
+
+${system_prompt}"
+
+  # Log the session
+  echo "$(now) | ${mode_upper} | ${prompt}" >> "$CBUS_DIR/logs/sessions.log"
+
+  echo -e "${CYAN}${BOLD}[${mode_upper}]${NC} Loading ${mode_lower} mode...\n"
+
+  # Check if claude CLI is available
+  if command -v claude &>/dev/null; then
+    echo "$full_prompt" > "$CBUS_DIR/.current_prompt.md"
+    echo -e "${DIM}System prompt written to ${CBUS_DIR}/.current_prompt.md${NC}"
+    echo -e "${DIM}Snapshot injected. Starting claude session...${NC}\n"
+    claude --system-prompt "$full_prompt" "$prompt"
+  else
+    # Fallback: print the prepared context for manual use
+    echo -e "${YELLOW}Claude CLI not found.${NC} Here's your prepared session:\n"
+    echo -e "${DIM}────── SYSTEM PROMPT ──────${NC}"
+    echo "$full_prompt"
+    echo -e "${DIM}────── YOUR PROMPT ────────${NC}"
+    echo "$prompt"
+    echo -e "${DIM}───────────────────────────${NC}"
+    echo ""
+    echo -e "Copy the above into your AI tool, or install Claude CLI: ${BOLD}npm install -g @anthropic-ai/claude-code${NC}"
+  fi
+}
+
+cmd_decide() {
+  require_state
+  local id="$1"
+  local verdict="${*:2}"
+
+  if [[ -z "$id" || -z "$verdict" ]]; then
+    echo -e "${RED}Error:${NC} Usage: ${GREEN}cbus decide <id> <verdict>${NC}"
+    echo -e "  Example: cbus decide d-001 \"Use file-based storage\""
+    exit 1
+  fi
+
+  echo -e "${GREEN}Decision ${id}:${NC} ${verdict}"
+  echo -e "${DIM}Update state.yaml manually to record the full reasoning.${NC}"
+  echo "$(now) | DECIDE | ${id} | ${verdict}" >> "$CBUS_DIR/logs/sessions.log"
+}
+
+cmd_block() {
+  require_state
+  local desc="$*"
+  if [[ -z "$desc" ]]; then
+    echo -e "${RED}Error:${NC} Usage: ${GREEN}cbus block \"description\"${NC}"
+    exit 1
+  fi
+  echo "$(now) | BLOCKER | ${desc}" >> "$CBUS_DIR/logs/sessions.log"
+  echo -e "${YELLOW}Blocker added:${NC} ${desc}"
+  echo -e "${DIM}Add to state.yaml blockers list to persist.${NC}"
+}
+
+cmd_reflect() {
+  require_state
+  require_cbus
+
+  local today
+  today=$(timestamp)
+  local ref_file="$CBUS_DIR/reflections/${today}.yaml"
+
+  echo ""
+  echo -e "  ${BOLD}═══ Reflection: ${today} ═══${NC}"
+  echo ""
+
+  # Show today's session log
+  if [[ -f "$CBUS_DIR/logs/sessions.log" ]]; then
+    local today_logs
+    today_logs=$(grep "^${today}" "$CBUS_DIR/logs/sessions.log" 2>/dev/null || true)
+    if [[ -n "$today_logs" ]]; then
+      echo -e "  ${DIM}Today's sessions:${NC}"
+      echo "$today_logs" | while IFS= read -r line; do
+        echo -e "    ${line}"
+      done
+      echo ""
+    fi
+  fi
+
+  # Interactive reflection
+  read -rp "  Score (1-10): " score
+  read -rp "  Key insight: " insight
+  echo ""
+
+  read -rp "  THINK time (0-1): " t_think
+  read -rp "  BUILD time (0-1): " t_build
+  read -rp "  LEARN time (0-1): " t_learn
+  read -rp "  OPERATE time (0-1): " t_operate
+  echo ""
+
+  read -rp "  Wheelchair uses (AI did thinking for you): " wheelchair
+  read -rp "  Spotter uses (AI challenged your thinking): " spotter
+  echo ""
+
+  # Calculate friction ratio
+  local total=$((${wheelchair:-0} + ${spotter:-0}))
+  local ratio="0"
+  if [[ $total -gt 0 ]]; then
+    ratio=$(echo "scale=2; ${spotter:-0} / $total" | bc)
+  fi
+
+  cat > "$ref_file" <<EOF
+date: ${today}
+score: ${score:-5}
+insight: "${insight:-No insight recorded}"
+mode_distribution:
+  THINK: ${t_think:-0}
+  BUILD: ${t_build:-0}
+  LEARN: ${t_learn:-0}
+  OPERATE: ${t_operate:-0}
+friction_check:
+  wheelchair_uses: ${wheelchair:-0}
+  spotter_uses: ${spotter:-0}
+  ratio: ${ratio}
+EOF
+
+  echo -e "  ${GREEN}Reflection saved${NC} → ${ref_file}"
+  echo ""
+
+  # Friction feedback
+  if (( $(echo "$ratio < 0.5" | bc -l 2>/dev/null || echo 1) )); then
+    echo -e "  ${YELLOW}⚠ Friction ratio ${ratio}${NC} — you may be using AI as a wheelchair."
+    echo -e "  ${DIM}Try routing more uncapped-payoff tasks through THINK mode.${NC}"
+  else
+    echo -e "  ${GREEN}Friction ratio ${ratio}${NC} — good balance of challenge vs delegation."
+  fi
+  echo ""
+}
+
+cmd_scorecard() {
+  require_cbus
+
+  local ref_dir="$CBUS_DIR/reflections"
+  if [[ ! -d "$ref_dir" ]] || [[ -z "$(ls -A "$ref_dir" 2>/dev/null)" ]]; then
+    echo -e "${YELLOW}No reflections yet.${NC} Run ${GREEN}cbus reflect${NC} first."
+    exit 0
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}═══ Weekly Scorecard ═══${NC}"
+  echo ""
+
+  local count=0 total_score=0
+  local total_think=0 total_build=0 total_learn=0 total_operate=0
+  local total_wheelchair=0 total_spotter=0
+  local latest_insight=""
+
+  for f in "$ref_dir"/*.yaml; do
+    [[ -f "$f" ]] || continue
+    count=$((count + 1))
+
+    local s
+    s=$(grep "^score:" "$f" | sed 's/score: *//')
+    total_score=$((total_score + ${s:-0}))
+
+    local tk bu le op
+    tk=$(grep "THINK:" "$f" | head -1 | sed 's/.*THINK: *//')
+    bu=$(grep "BUILD:" "$f" | head -1 | sed 's/.*BUILD: *//')
+    le=$(grep "LEARN:" "$f" | head -1 | sed 's/.*LEARN: *//')
+    op=$(grep "OPERATE:" "$f" | head -1 | sed 's/.*OPERATE: *//')
+
+    total_think=$(echo "$total_think + ${tk:-0}" | bc)
+    total_build=$(echo "$total_build + ${bu:-0}" | bc)
+    total_learn=$(echo "$total_learn + ${le:-0}" | bc)
+    total_operate=$(echo "$total_operate + ${op:-0}" | bc)
+
+    local wh sp
+    wh=$(grep "wheelchair_uses:" "$f" 2>/dev/null | sed 's/.*wheelchair_uses: *//')
+    sp=$(grep "spotter_uses:" "$f" 2>/dev/null | sed 's/.*spotter_uses: *//')
+    total_wheelchair=$((total_wheelchair + ${wh:-0}))
+    total_spotter=$((total_spotter + ${sp:-0}))
+
+    latest_insight=$(grep "^insight:" "$f" | sed 's/insight: *//' | sed 's/^"//' | sed 's/"$//')
+  done
+
+  if [[ $count -eq 0 ]]; then
+    echo -e "  ${YELLOW}No reflections found.${NC}"
+    return
+  fi
+
+  local avg_score
+  avg_score=$(echo "scale=1; $total_score / $count" | bc)
+
+  # Build mode bars
+  bar() {
+    local val=$1
+    local blocks
+    blocks=$(echo "scale=0; $val / $count * 10 / 1" | bc 2>/dev/null || echo 0)
+    local bar=""
+    for ((i=0; i<blocks && i<10; i++)); do bar+="█"; done
+    for ((i=blocks; i<4; i++)); do bar+="░"; done
+    echo "$bar"
+  }
+
+  local friction_total=$((total_wheelchair + total_spotter))
+  local friction_ratio="0"
+  if [[ $friction_total -gt 0 ]]; then
+    friction_ratio=$(echo "scale=2; $total_spotter / $friction_total" | bc)
+  fi
+
+  echo -e "  ${DIM}Sessions${NC}        ${count}"
+  echo -e "  ${DIM}Avg Score${NC}       ${avg_score} / 10"
+  echo ""
+  echo -e "  ${DIM}Mode Balance${NC}    THINK $(bar "$total_think")  BUILD $(bar "$total_build")  LEARN $(bar "$total_learn")  OPERATE $(bar "$total_operate")"
+  echo ""
+  echo -e "  ${DIM}Friction${NC}        wheelchair: ${total_wheelchair}  spotter: ${total_spotter}  ratio: ${friction_ratio}"
+  echo ""
+  echo -e "  ${DIM}Latest Insight${NC}  ${latest_insight:-none}"
+  echo ""
+
+  if (( $(echo "$friction_ratio < 0.5" | bc -l 2>/dev/null || echo 1) )); then
+    echo -e "  ${YELLOW}Recommendation:${NC} Increase THINK mode usage for high-value tasks."
+  else
+    echo -e "  ${GREEN}Recommendation:${NC} Good friction balance. Keep challenging yourself."
+  fi
+  echo ""
+}
+
+# ── Main ─────────────────────────────────────────────────
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  init)      cmd_init ;;
+  status)    cmd_status ;;
+  snapshot)  cmd_snapshot ;;
+  think)     cmd_mode_session "think" "$@" ;;
+  build)     cmd_mode_session "build" "$@" ;;
+  learn)     cmd_mode_session "learn" "$@" ;;
+  operate)   cmd_mode_session "operate" "$@" ;;
+  decide)    cmd_decide "$@" ;;
+  block)     cmd_block "$@" ;;
+  unblock)   echo -e "${DIM}Remove the blocker from state.yaml manually.${NC}" ;;
+  reflect)   cmd_reflect ;;
+  scorecard) cmd_scorecard ;;
+  help|--help|-h) usage ;;
+  *)
+    echo -e "${RED}Unknown command:${NC} $cmd"
+    echo ""
+    usage
+    exit 1
+    ;;
+esac
