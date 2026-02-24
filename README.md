@@ -54,6 +54,7 @@ mkdir -p .cbus/prompts
 | [08-claude-cli-integration](docs/cognitive-bus/08-claude-cli-integration.md) | Integration with Claude Code CLI |
 | [09-security-and-permissions](docs/cognitive-bus/09-security-and-permissions.md) | Permission model and security layers |
 | [10-roadmap-openclaw](docs/cognitive-bus/10-roadmap-openclaw.md) | Files → CLI → Service → OpenClaw runtime |
+| [11-intelligent-friction](docs/cognitive-bus/11-intelligent-friction.md) | AI as gym spotter, not wheelchair (theMITmonk) |
 
 ## Roadmap
 
